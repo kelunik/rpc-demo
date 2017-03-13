@@ -35,6 +35,10 @@ Amp\run(function () {
         $payload = yield $beanstalkSubscriber->reserve();
         $data = json_decode($payload[1], true);
 
-        $server->sendTo($data["ip"], $data["port"], $data["data"] . PHP_EOL);
+        try {
+            yield $server->sendTo($data["ip"], $data["port"], $data["data"] . PHP_EOL);
+        } catch (Exception $e) {
+            print "Could not send to {$data['ip']} on port {$data["port"]}: " . $e->getMessage() . PHP_EOL;
+        }
     }
 });

@@ -2,13 +2,13 @@
 
 namespace Demo;
 
-use function Amp\cancel;
 use Amp\Deferred;
 use Amp\Failure;
+use Exception;
+use function Amp\cancel;
 use function Amp\onReadable;
 use function Amp\onWritable;
 use function Amp\Socket\listen;
-use Exception;
 
 class Server {
     private $callback;
@@ -20,49 +20,69 @@ class Server {
 
     public function bind(string $addr) {
         $serverSocket = listen($addr);
+        $this->setupClientAcceptor($serverSocket);
+    }
 
-        onReadable($serverSocket, function ($watcherId, $serverSocket) {
-            if (!$client = @\stream_socket_accept($serverSocket, 0, $peerName)) {
+    private function setupClientAcceptor($serverSocket) {
+        onReadable($serverSocket, function () use ($serverSocket) {
+            if (!$clientSocket = @\stream_socket_accept($serverSocket, 0, $peerName)) {
                 return;
             }
 
-            $portStartPos = strrpos($peerName, ":");
-            $ip = substr($peerName, 0, $portStartPos);
-            $port = substr($peerName, $portStartPos + 1);
-
-            $this->clients[$peerName] = $client;
-
-            print "Accepting client from {$ip} on port {$port}" . PHP_EOL;
-
-            \stream_set_blocking($client, false);
-
-            onReadable($client, function ($watcherId, $client) use ($ip, $port) {
-                static $buffer = "";
-
-                $data = \fread($client, 8192);
-
-                if ($data === "" || $data === false) {
-                    if (!\is_resource($client) || @\feof($client)) {
-                        cancel($watcherId);
-                    }
-
-                    return;
-                }
-
-                $buffer .= $data;
-
-                while (($pos = \strpos($buffer, "\n")) !== false) {
-                    $line = \trim(\substr($buffer, 0, $pos));
-                    $buffer = substr($buffer, $pos + 1);
-
-                    $callback = $this->callback;
-                    $callback($line, $ip, $port);
-                }
-            });
+            $this->loadClient($clientSocket, $peerName);
         });
     }
 
-    public function sendTo(string $ip, string $port, string $payload) {
+    private function loadClient($clientSocket, $peerName) {
+        $portStartPos = strrpos($peerName, ":");
+        $ip = substr($peerName, 0, $portStartPos);
+        $port = (int) substr($peerName, $portStartPos + 1);
+
+        print "Accepting client from {$ip} on port {$port}" . PHP_EOL;
+
+        $this->clients[$peerName] = $clientSocket;
+        \stream_set_blocking($clientSocket, false);
+
+        $this->setupClientReadWatcher($clientSocket, $ip, $port);
+    }
+
+    private function setupClientReadWatcher($clientSocket, $ip, $port) {
+        onReadable($clientSocket, function ($watcherId, $clientSocket) use ($ip, $port) {
+            static $buffer = "";
+
+            $data = \fread($clientSocket, 8192);
+
+            if ($data === "" || $data === false) {
+                if (!\is_resource($clientSocket) || @\feof($clientSocket)) {
+                    cancel($watcherId);
+
+                    print "Client closed connection from {$ip} on port {$port}" . PHP_EOL;
+
+                    $this->unloadClient($ip, $port);
+                }
+
+                return;
+            }
+
+            // Buffer data and emit line by line once we have a line feed
+
+            $buffer .= $data;
+
+            while (($pos = \strpos($buffer, "\n")) !== false) {
+                $line = \trim(\substr($buffer, 0, $pos));
+                $buffer = substr($buffer, $pos + 1);
+
+                $callback = $this->callback;
+                $callback($line, $ip, $port);
+            }
+        });
+    }
+
+    private function unloadClient(string $ip, int $port) {
+        unset($this->clients[$ip . ":" . $port]);
+    }
+
+    public function sendTo(string $ip, int $port, string $payload) {
         if (!isset($this->clients[$ip . ":" . $port])) {
             return new Failure(new Exception("Client already disconnected."));
         }
@@ -71,7 +91,7 @@ class Server {
 
         $deferred = new Deferred;
 
-        onWritable($client, function ($watcherId) use ($client, $payload) {
+        onWritable($client, function ($watcherId) use ($deferred, $client, $payload) {
             static $buffer = null;
 
             if ($buffer === null) {
@@ -89,6 +109,7 @@ class Server {
             $buffer = substr($buffer, $bytes);
 
             if (!strlen($buffer)) {
+                $deferred->succeed();
                 cancel($watcherId);
             }
         });
