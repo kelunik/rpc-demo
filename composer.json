@@ -1,0 +1,22 @@
+{
+    "name": "kelunik/rpc-demo",
+    "description": "RPC demo.",
+    "type": "project",
+    "require": {
+        "amphp/amp": "^1.2",
+        "amphp/beanstalk": "^0.1.1",
+        "amphp/socket": "^0.9.9"
+    },
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Niklas Keller",
+            "email": "me@kelunik.com"
+        }
+    ],
+    "autoload": {
+        "psr-4": {
+            "Demo\\": "src"
+        }
+    }
+}

@@ -1,0 +1,40 @@
+#!/usr/bin/env php
+<?php
+
+use Amp\Beanstalk\BeanstalkClient;
+use Demo\Server;
+
+require __DIR__ . "/../vendor/autoload.php";
+
+Amp\run(function () {
+    $beanstalkClient = new BeanstalkClient("tcp://127.0.0.1:11300?tube=rpc");
+
+    $server = new Server(function ($data, $ip, $port) use ($beanstalkClient) {
+        print "Received '{$data}' from {$ip} on port {$port}" . PHP_EOL;
+
+        $payload = json_encode([
+            "ip" => $ip,
+            "port" => $port,
+            "data" => $data,
+        ]);
+
+        $beanstalkClient->put($payload)->when(function (Throwable $error = null) {
+            if ($error) {
+                print "Putting into queue failed: " . $error->getMessage() . PHP_EOL;
+            }
+        });
+    });
+
+    $server->bind("127.0.0.1:2000");
+
+    $beanstalkSubscriber = new BeanstalkClient("tcp://127.0.0.1:11300");
+
+    yield $beanstalkSubscriber->watch("rpc-response");
+
+    while (true) {
+        $payload = yield $beanstalkSubscriber->reserve();
+        $data = json_decode($payload[1], true);
+
+        $server->sendTo($data["ip"], $data["port"], $data["data"] . PHP_EOL);
+    }
+});

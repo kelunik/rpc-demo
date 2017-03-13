@@ -1,0 +1,26 @@
+#!/usr/bin/env php
+<?php
+
+use Amp\Beanstalk\BeanstalkClient;
+
+require __DIR__ . "/../vendor/autoload.php";
+
+Amp\run(function () {
+    $client = new BeanstalkClient("tcp://127.0.0.1:11300?tube=rpc-response");
+
+    yield $client->watch("rpc");
+
+    while (true) {
+        print "Reserving new job... " . PHP_EOL;
+
+        $payload = yield $client->reserve();
+        $data = json_decode($payload[1], true);
+
+        print "Received '{$data['data']}' from {$data['ip']} on port {$data['port']}" . PHP_EOL;
+
+        $data["data"] = base64_encode($data["data"]);
+
+        yield $client->put(json_encode($data));
+        yield $client->delete($payload[0]);
+    }
+});
