@@ -7,9 +7,9 @@ use Demo\Server;
 require __DIR__ . "/../vendor/autoload.php";
 
 Amp\run(function () {
-    $beanstalk = new BeanstalkClient("tcp://127.0.0.1:11300?tube=rpc");
+    $beanstalkClient = new BeanstalkClient("tcp://127.0.0.1:11300?tube=rpc");
 
-    $server = new Server(function ($data, $ip, $port) use ($beanstalk) {
+    $server = new Server(function ($data, $ip, $port) use ($beanstalkClient) {
         print "Received '{$data}' from {$ip} on port {$port}" . PHP_EOL;
 
         $payload = json_encode([
@@ -18,7 +18,7 @@ Amp\run(function () {
             "data" => $data,
         ]);
 
-        $beanstalk->put($payload)->when(function (Throwable $error = null) {
+        $beanstalkClient->put($payload)->when(function (Throwable $error = null) {
             if ($error) {
                 print "Putting into queue failed: " . $error->getMessage() . PHP_EOL;
             }
@@ -27,16 +27,21 @@ Amp\run(function () {
 
     $server->bind("127.0.0.1:2000");
 
-    yield $beanstalk->watch("rpc-response");
+    // We have to use a second one here, as reserve blocks the put in the server callback otherwise
+    $beanstalkConsumer = new BeanstalkClient("tcp://127.0.0.1:11300");
+
+    yield $beanstalkConsumer->watch("rpc-response");
 
     while (true) {
-        $payload = yield $beanstalk->reserve();
+        $payload = yield $beanstalkConsumer->reserve();
         $data = json_decode($payload[1], true);
 
         try {
-            yield $server->sendTo($data["ip"], $data["port"], $data["data"] . PHP_EOL);
+            yield $server->send($data["ip"], $data["port"], $data["data"] . PHP_EOL);
         } catch (Exception $e) {
             print "Could not send to {$data['ip']} on port {$data["port"]}: " . $e->getMessage() . PHP_EOL;
         }
+
+        yield $beanstalkConsumer->delete($payload[0]);
     }
 });

@@ -6,13 +6,17 @@ use Amp\Deferred;
 use Amp\Failure;
 use Exception;
 use function Amp\cancel;
+use function Amp\disable;
+use function Amp\enable;
 use function Amp\onReadable;
 use function Amp\onWritable;
 use function Amp\Socket\listen;
 
 class Server {
     private $callback;
-    private $clients;
+    private $clients = [];
+    private $clientWriteQueue = [];
+    private $clientWriteWatchers = [];
 
     public function __construct(callable $callback) {
         $this->callback = $callback;
@@ -43,10 +47,10 @@ class Server {
         $this->clients[$peerName] = $clientSocket;
         \stream_set_blocking($clientSocket, false);
 
-        $this->setupClientReadWatcher($clientSocket, $ip, $port);
+        $this->setupClientWatchers($clientSocket, $ip, $port);
     }
 
-    private function setupClientReadWatcher($clientSocket, $ip, $port) {
+    private function setupClientWatchers($clientSocket, $ip, $port) {
         onReadable($clientSocket, function ($watcherId, $clientSocket) use ($ip, $port) {
             static $buffer = "";
 
@@ -76,43 +80,55 @@ class Server {
                 $callback($line, $ip, $port);
             }
         });
+
+        $writeWatcher = onWritable($clientSocket, function ($watcherId, $clientSocket) {
+            $item = array_shift($this->clientWriteQueue[(int) $clientSocket]);
+            $bytes = fwrite($clientSocket, $item[1]);
+
+            if ($bytes === false) {
+                cancel($watcherId);
+
+                // TODO: Unload client
+
+                return;
+            }
+
+            $item[1] = substr($item[1], $bytes);
+
+            if (!strlen($item[1])) {
+                $item[0]->succeed();
+
+                if (empty($this->clientWriteQueue[(int) $clientSocket])) {
+                    unset($this->clientWriteQueue[(int) $clientSocket]);
+                    disable($watcherId);
+                }
+            } else {
+                array_unshift($this->clientWriteQueue[(int) $clientSocket], $item);
+            }
+        });
+
+        $this->clientWriteWatchers[(int) $clientSocket] = $writeWatcher;
+
+        disable($writeWatcher);
     }
 
     private function unloadClient(string $ip, int $port) {
         unset($this->clients[$ip . ":" . $port]);
     }
 
-    public function sendTo(string $ip, int $port, string $payload) {
+    public function send(string $ip, int $port, string $payload) {
         if (!isset($this->clients[$ip . ":" . $port])) {
             return new Failure(new Exception("Client already disconnected."));
         }
 
-        $client = $this->clients[$ip . ":" . $port];
-
         $deferred = new Deferred;
 
-        onWritable($client, function ($watcherId) use ($deferred, $client, $payload) {
-            static $buffer = null;
+        $this->clientWriteQueue[(int) $this->clients[$ip . ":" . $port]][] = [
+            $deferred,
+            $payload,
+        ];
 
-            if ($buffer === null) {
-                $buffer = $payload;
-            }
-
-            $bytes = fwrite($client, $payload);
-
-            if ($bytes === false) {
-                cancel($watcherId);
-
-                return;
-            }
-
-            $buffer = substr($buffer, $bytes);
-
-            if (!strlen($buffer)) {
-                $deferred->succeed();
-                cancel($watcherId);
-            }
-        });
+        enable($this->clientWriteWatchers[(int) $this->clients[$ip . ":" . $port]]);
 
         return $deferred->promise();
     }
